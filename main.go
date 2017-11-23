@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+    "bytes"
 )
 
 var (
@@ -156,6 +157,7 @@ func consume(server []string, topic string, startDate time.Time, endDate time.Ti
 						fmt.Println("error: ", err)
 						break
 					}
+					msg.Value = bytes.Replace(msg.Value, []byte("\n"), []byte("[br]"), -1)
 					toWrite = append(toWrite, msg.Value...)
 					toWrite = append(toWrite, '\n')
 					if i > 5000 {

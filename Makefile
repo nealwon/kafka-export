@@ -1,6 +1,6 @@
 GO=/opt/go/bin/go
 
-all: prepare
+all: clean prepare
 	${GO} build -ldflags "-w -s" -o kfk
 
 prepare:
