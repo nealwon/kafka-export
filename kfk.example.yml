@@ -1,0 +1,11 @@
+servers:
+    # structure: 
+    #   brokerservers:
+    #       [topics]
+  "192.168.1.110:9092":
+    - topic_a0
+    - topic_a1
+    - topic_a2
+  "192.168.10.110:9092":
+    - topic_b0
+    - topic_b1
