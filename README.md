@@ -1,4 +1,6 @@
-# 导出Kafka的数据到文本，一个payload一行, payload内容中的换行符由[br]替换
+# 导出Kafka的数据到文本
+
+一个payload一行, payload内容中的换行符由[br]替换
 
 # Requirement:
 
