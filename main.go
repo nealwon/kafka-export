@@ -1,66 +1,73 @@
 package main
 
 import (
+	"bytes"
+	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/optiopay/kafka"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"os"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-    "bytes"
 )
 
 var (
 	startDate    = flag.Int("s", 0, "set start date")
 	endDate      = flag.Int("e", 0, "set end date")
-	specifyDate  = flag.Int("d", 0, "set one day, higher priorty then start and end")
+	specifyDate  = flag.Int("d", 0, "set one day, higher priorty then start/end")
 	topic        = flag.String("t", "", "set topic")
 	configFile   = flag.String("c", "./kfk.yml", "set config file")
 	outputFile   = flag.String("o", "-", "output file, '-' is output in stdout")
 	perfileLines = flag.Int64("l", 0, "split files when reach lines,0=no split")
+    outputFormat = flag.String("f", "text", "output format, available: text, csv")
+	outputFields = flag.String("fields", "", "output fields limit, payload must be json string format")
+	batchSize    = flag.Int("bs", 10000, "batch write size")
 )
 
 type OutputHandle struct {
 	Topic      string
 	File       *os.File
-	UseFile    bool
 	WriteLines int64
 	Seq        int
 	Mutex      *sync.Mutex
-}
-type Config struct {
-	Servers     map[string][]string          `yaml:"servers"`
+	Writer     *csv.Writer
 }
 
 type Payload map[string]interface{}
 
+type Config struct {
+	Servers     map[string][]string          `yaml:"servers"`
+	TopicFields map[string]map[string]string `yaml:"topic_fields"`
+}
+
 var oh *OutputHandle
 var wg sync.WaitGroup
+var topicFields []string
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	flag.Parse()
-	if *outputFile == "" {
-		fmt.Println("Output file is empty")
-		os.Exit(1)
-	}
 	oh = &OutputHandle{
 		Topic: *topic,
 		File:  os.Stdout,
 		Mutex: new(sync.Mutex),
 	}
 	var err error
-	if *outputFile != "" && *outputFile != "-" && *outputFile != "sqlite" {
+	if *outputFile != "-" && *outputFile!="" {
 		oh.File, err = os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(2)
 		}
 		defer oh.File.Close()
-		oh.UseFile = true
 	}
 
 	cfg := Config{}
@@ -102,6 +109,31 @@ func main() {
 		fmt.Println("start date > end date")
 		return
 	}
+	if *outputFormat == "csv" {
+		var tf map[string]string
+		var ok bool
+		if tf, ok = cfg.TopicFields[*topic]; !ok {
+			fmt.Println("Topic not found in field configuration", *topic)
+			os.Exit(1)
+		}
+		oh.Writer = csv.NewWriter(oh.File)
+		var ofs []string
+		if *outputFields != "" && *outputFields != "-" {
+			ofs = strings.Split(*outputFields, ",")
+		}
+		for f, _ := range tf {
+            if len(ofs)>0 {
+                for _, of := range ofs {
+                    if of == f {
+                        topicFields = append(topicFields, f)
+                    }
+                }
+            } else {
+                topicFields = append(topicFields, f)
+            }
+        }
+		oh.Writer.Write(topicFields)
+    }
 	consume(kfkServer, *topic, t0, t1)
 	wg.Wait()
 }
@@ -145,8 +177,10 @@ func consume(server []string, topic string, startDate time.Time, endDate time.Ti
 			wg.Add(1)
 			go func(consumer kafka.Consumer, topic string, partition int) {
 				defer wg.Done()
-				var toWrite []byte
+				var toWrite []string
+				var toWriteCsv [][]string
 				var i int
+				var payload Payload
 				for {
 					msg, err := consumer.Consume()
 					if err != nil {
@@ -157,13 +191,94 @@ func consume(server []string, topic string, startDate time.Time, endDate time.Ti
 						fmt.Println("error: ", err)
 						break
 					}
-					msg.Value = bytes.Replace(msg.Value, []byte("\n"), []byte("[br]"), -1)
-					toWrite = append(toWrite, msg.Value...)
-					toWrite = append(toWrite, '\n')
-					if i > 5000 {
-						oh.File.Write(toWrite)
+					msg.Value = bytes.Replace(msg.Value, []byte("\n"), []byte("<br>"), -1)
+					if *outputFormat == "csv" {
+						if err = json.Unmarshal(msg.Value, &payload); err != nil {
+							fmt.Println(err)
+							continue
+						}
+						var row []string
+						var isSubField bool
+						var subFieldName string
+						for _, field := range topicFields {
+							isSubField = false
+							if strings.Contains(field, ".") {
+								subFields := strings.Split(field, ".")
+								subFieldName = subFields[len(subFields)-1]
+								field = subFields[0]
+								isSubField = true
+							}
+							if v, existed := payload[field]; existed {
+								switch v.(type) {
+								case int:
+									row = append(row, strconv.Itoa(v.(int)))
+								case int64:
+									row = append(row, fmt.Sprintf("%d", v.(int64)))
+								case float32:
+									row = append(row, fmt.Sprintf("%f", v.(float32)))
+								case float64:
+									row = append(row, fmt.Sprintf("%d", uint64(v.(float64))))
+								case string:
+									if isSubField {
+										fmt.Printf("v.string= %s\n", v.(string))
+										preg := regexp.MustCompile(subFieldName + `\s*=[\s"]*(\d+)["\s]*`)
+										sm := preg.FindAllString(v.(string), 1)
+										if len(sm) > 1 {
+											row = append(row, sm[1])
+										} else {
+											row = append(row, "0")
+										}
+									} else {
+										row = append(row, v.(string))
+									}
+								case map[string]interface{}:
+									//fmt.Printf("MAP: %#v\n", v)
+									newMap := v.(map[string]interface{})
+									if nv, ok := newMap[subFieldName]; ok {
+										switch nv.(type) {
+										case int:
+											row = append(row, fmt.Sprintf("%f", nv.(int)))
+										case int64:
+											row = append(row, fmt.Sprintf("%f", nv.(int64)))
+										case float32:
+											row = append(row, fmt.Sprintf("%f", nv.(float32)))
+										case float64:
+											row = append(row, fmt.Sprintf("%d", uint64(nv.(float64))))
+										case string:
+											row = append(row, v.(string))
+										default:
+											row = append(row, fmt.Sprintf("%v", nv))
+										}
+									} else {
+										row = append(row, "")
+									}
+								default:
+									fmt.Printf("D: %T\n", v)
+									x, err := json.Marshal(v)
+									if err != nil {
+										fmt.Println(err)
+									}
+									row = append(row, string(x))
+								}
+							} else {
+								//fmt.Printf("Not found: field=%s,value=%#v\n", field, v)
+								row = append(row, "")
+							}
+						}
+						toWriteCsv = append(toWriteCsv, row)
+					} else {
+						toWrite = append(toWrite, string(msg.Value))
+					}
+					if i > *batchSize {
+						oh.Mutex.Lock()
+						if *outputFormat == "csv" {
+							oh.Writer.WriteAll(toWriteCsv)
+							toWriteCsv = [][]string{}
+						} else {
+							oh.File.WriteString(strings.Join(toWrite, "\n"))
+							toWrite = []string{}
+						}
 						oh.WriteLines += int64(i)
-						toWrite = []byte{}
 						i = 0
 						if *perfileLines > 0 {
 							if oh.WriteLines > *perfileLines {
@@ -173,22 +288,34 @@ func consume(server []string, topic string, startDate time.Time, endDate time.Ti
 									fmt.Println(err)
 									break
 								}
+								if *outputFormat == "csv" {
+									oh.Writer = csv.NewWriter(oh.File)
+									oh.Writer.Write(topicFields)
+								}
 								oh.WriteLines = 0
 								oh.Seq += 1
 							}
 						}
+						oh.Mutex.Unlock()
 					}
 					i++
 				}
 				if i > 0 {
-					oh.File.Write(toWrite)
-					toWrite = []byte{}
+					oh.Mutex.Lock()
+					if *outputFormat == "csv" {
+						oh.Writer.WriteAll(toWriteCsv)
+					} else {
+						oh.File.WriteString(strings.Join(toWrite, "\n"))
+					}
+					toWrite = []string{}
 					if *perfileLines > 0 {
 						oh.WriteLines += int64(i)
 					}
+					oh.Mutex.Unlock()
 				}
 				fmt.Printf("Topic [%s] partition [%d] done\n", topic, partition)
 			}(consumer, cc.Topic, i)
 		}
 	}
 }
+

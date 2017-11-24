@@ -9,3 +9,19 @@ servers:
   "192.168.10.110:9092":
     - topic_b0
     - topic_b1
+
+# define topic fields
+# format:
+#   fieldname: field type
+# field type is for future use (db storage)
+topic_fields:
+    topic_a0:
+        id: integer
+        name: text
+        status: integer
+        created: numeric
+    topic_b0:
+        id: integer
+        user_count: integer
+        user_name: text
+        created: numeric
