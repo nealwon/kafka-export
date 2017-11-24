@@ -19,7 +19,7 @@ Usage of ./kfk:
   -c string
         set config file (default "./kfk.yml")
   -d int
-        set one day, higher priorty then start/end
+        set one day, higher priorty than start/end
   -e int
         set end date
   -f string
@@ -29,7 +29,7 @@ Usage of ./kfk:
   -l int
         split files when reach lines,0=no split
   -o string
-        output file, '-' is output in stdout (default "-")
+        output file, '-'=stdout (default "-")
   -s int
         set start date
   -t string
